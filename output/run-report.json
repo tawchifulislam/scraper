@@ -1,0 +1,10 @@
+{
+  "started_at": "2026-09-24T21:10:35.509Z",
+  "duration_ms": 214,
+  "catalogue_pages": 3,
+  "books_discovered": 60,
+  "valid_records": 60,
+  "invalid_records": 0,
+  "failed_pages": 0,
+  "failed_page_details": []
+}

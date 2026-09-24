@@ -9,17 +9,31 @@ const USER_AGENT =
   'FlyRankInternship-A9/1.0 (+https://github.com/tawchifulislam/scraper)';
 const MAX_PAGES = 3;
 
-async function fetchPage(url, cachePath) {
+async function fetchPage(url, cachePath, attempt = 1) {
   if (existsSync(cachePath)) {
     const cached = await readFile(cachePath, 'utf-8');
     console.log(`CACHE HIT (${cached.length} bytes)`);
-    return cached;
+    return { html: cached, wasCached: true };
   }
 
-  const response = await fetch(url, {
-    headers: { 'User-Agent': USER_AGENT },
-    signal: AbortSignal.timeout(10000),
-  });
+  let response;
+  try {
+    response = await fetch(url, {
+      headers: { 'User-Agent': USER_AGENT },
+      signal: AbortSignal.timeout(10000),
+    });
+  } catch (err) {
+    if (attempt < 2) {
+      await sleep(1000);
+      return fetchPage(url, cachePath, attempt + 1);
+    }
+    throw new Error(`Network error after retry: ${err.message}`);
+  }
+
+  if (response.status >= 500 && attempt < 2) {
+    await sleep(1000);
+    return fetchPage(url, cachePath, attempt + 1);
+  }
 
   if (response.status !== 200) {
     throw new Error(`Fetch failed with status ${response.status}`);
@@ -31,7 +45,7 @@ async function fetchPage(url, cachePath) {
   await writeFile(cachePath, html, 'utf-8');
 
   console.log(`FETCH (${html.length} bytes)`);
-  return html;
+  return { html, wasCached: false };
 }
 
 function sleep(ms) {
@@ -47,8 +61,7 @@ async function discoverCataloguePages() {
     pageCount += 1;
     const cachePath = `cache/catalogue-page-${pageCount}.html`;
 
-    const wasCached = existsSync(cachePath);
-    const html = await fetchPage(currentUrl, cachePath);
+    const { html, wasCached } = await fetchPage(currentUrl, cachePath);
 
     const $ = cheerio.load(html);
 
@@ -70,8 +83,7 @@ async function discoverCataloguePages() {
 }
 async function extractBookDetails(bookUrl, index) {
   const cachePath = `cache/book-${index}.html`;
-  const wasCached = existsSync(cachePath);
-  const html = await fetchPage(bookUrl, cachePath);
+  const { html, wasCached } = await fetchPage(bookUrl, cachePath);
 
   const $ = cheerio.load(html);
 
@@ -160,6 +172,9 @@ function validateRecords(rawRecords) {
 }
 
 async function main() {
+  const startTime = Date.now();
+  const startedAt = new Date().toISOString();
+
   const { pageCount, bookLinks } = await discoverCataloguePages();
 
   console.log(`catalogue_pages=${pageCount}`);
@@ -167,9 +182,16 @@ async function main() {
   console.log(`unique_urls=${new Set(bookLinks).size}`);
 
   const rawRecords = [];
+  const failedPages = [];
+
   for (let i = 0; i < bookLinks.length; i++) {
-    const record = await extractBookDetails(bookLinks[i], i + 1);
-    rawRecords.push(record);
+    try {
+      const record = await extractBookDetails(bookLinks[i], i + 1);
+      rawRecords.push(record);
+    } catch (err) {
+      failedPages.push({ url: bookLinks[i], reason: err.message });
+      console.log(`FAILED: ${bookLinks[i]} (${err.message})`);
+    }
   }
 
   console.log(`detail_pages=${rawRecords.length}`);
@@ -191,8 +213,28 @@ async function main() {
     );
   }
 
+  const durationMs = Date.now() - startTime;
+
+  const report = {
+    started_at: startedAt,
+    duration_ms: durationMs,
+    catalogue_pages: pageCount,
+    books_discovered: bookLinks.length,
+    valid_records: validRecords.length,
+    invalid_records: errors.length,
+    failed_pages: failedPages.length,
+    failed_page_details: failedPages,
+  };
+
+  await writeFile(
+    'output/run-report.json',
+    JSON.stringify(report, null, 2),
+    'utf-8',
+  );
+
   console.log(`valid_records=${validRecords.length}`);
   console.log(`invalid_records=${errors.length}`);
+  console.log(`failed_pages=${failedPages.length}`);
 }
 
 main();
