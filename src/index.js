@@ -2,6 +2,7 @@
 import { writeFile, readFile, mkdir } from 'fs/promises';
 import { existsSync } from 'fs';
 import * as cheerio from 'cheerio';
+import { z } from 'zod';
 
 const BASE_URL = 'https://books.toscrape.com/catalogue/';
 const USER_AGENT =
@@ -102,6 +103,62 @@ async function extractBookDetails(bookUrl, index) {
   return record;
 }
 
+const BookSchema = z.object({
+  title: z.string().min(1),
+  product_url: z.string().url(),
+  price_gbp: z.number().positive(),
+  price_text: z.string(),
+  availability_text: z.string(),
+  rating_text: z.string(),
+  description: z.string().nullable(),
+  source_page: z.string().url(),
+  fetched_at: z.string(),
+});
+
+function normalizeRecord(raw) {
+  const priceMatch = raw.price_text.match(/[\d.]+/);
+  const priceGbp = priceMatch ? parseFloat(priceMatch[0]) : NaN;
+
+  return {
+    title: raw.title,
+    product_url: raw.product_url,
+    price_gbp: priceGbp,
+    price_text: raw.price_text,
+    availability_text: raw.availability_text,
+    rating_text: raw.rating_text,
+    description: raw.description,
+    source_page: raw.source_page,
+    fetched_at: raw.fetched_at,
+  };
+}
+
+function validateRecords(rawRecords) {
+  const validRecords = [];
+  const errors = [];
+  const seenUrls = new Set();
+
+  for (const raw of rawRecords) {
+    const normalized = normalizeRecord(raw);
+    const result = BookSchema.safeParse(normalized);
+
+    if (!result.success) {
+      errors.push({
+        product_url: raw.product_url,
+        reason: result.error.issues.map(issue => issue.message).join(', '),
+      });
+      continue;
+    }
+
+    if (seenUrls.has(normalized.product_url)) {
+      continue;
+    }
+    seenUrls.add(normalized.product_url);
+    validRecords.push(result.data);
+  }
+
+  return { validRecords, errors };
+}
+
 async function main() {
   const { pageCount, bookLinks } = await discoverCataloguePages();
 
@@ -109,15 +166,33 @@ async function main() {
   console.log(`discovered=${bookLinks.length}`);
   console.log(`unique_urls=${new Set(bookLinks).size}`);
 
-  const records = [];
+  const rawRecords = [];
   for (let i = 0; i < bookLinks.length; i++) {
     const record = await extractBookDetails(bookLinks[i], i + 1);
-    records.push(record);
+    rawRecords.push(record);
   }
 
-  console.log('First record:');
-  console.log(JSON.stringify(records[0], null, 2));
-  console.log(`detail_pages=${records.length}`);
+  console.log(`detail_pages=${rawRecords.length}`);
+
+  const { validRecords, errors } = validateRecords(rawRecords);
+
+  await mkdir('output', { recursive: true });
+  await writeFile(
+    'output/books.json',
+    JSON.stringify(validRecords, null, 2),
+    'utf-8',
+  );
+
+  if (errors.length > 0) {
+    await writeFile(
+      'output/errors.json',
+      JSON.stringify(errors, null, 2),
+      'utf-8',
+    );
+  }
+
+  console.log(`valid_records=${validRecords.length}`);
+  console.log(`invalid_records=${errors.length}`);
 }
 
 main();
